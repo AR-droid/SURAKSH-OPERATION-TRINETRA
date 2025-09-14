@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Suraksh Gunshot Analyzer</title>
+<style>
+body { background: #0a0f1a; color: #fff; font-family:'Arial',sans-serif; margin:0; padding:0; }
+.container { max-width:950px; margin:30px auto; padding:20px; border:2px solid #00ffcc; border-radius:15px; background:#111827; }
+h1 { text-align:center; color:#00ffcc; }
+.upload-box { display:flex; justify-content:center; gap:10px; margin-bottom:20px; }
+button { background:#00ffcc; border:none; padding:10px 20px; cursor:pointer; border-radius:5px; font-weight:bold; }
+button:hover { background:#00ddb3; }
+#results { background:#1f2937; padding:15px; border-radius:10px; margin-bottom:20px; }
+#results h2 { margin-top:0; color:#00ffcc; }
+#waveform, #waveformFallback { margin-top:20px; height:150px; }
+#map, #mapFallback { height:400px; margin-top:20px; border:2px solid #00ffcc; border-radius:10px; }
+.info-box { display:flex; justify-content:space-around; flex-wrap:wrap; margin-top:15px; }
+.info-card { background:#111827; border:1px solid #00ffcc; border-radius:10px; padding:10px; width:200px; margin:5px; text-align:center; }
+.info-card h3 { margin:5px 0; color:#00ffcc; }
+</style>
+
+<script src="https://unpkg.com/wavesurfer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+</head>
+<body>
+<div class="container">
+    <h1>Suraksh Gunshot Analyzer</h1>
+    <div class="upload-box">
+        <input type="file" id="audioFile" accept=".wav,.mp3">
+        <button onclick="uploadFile()">Analyze</button>
+    </div>
+
+    <div id="results">
+        <h2>Analysis Results</h2>
+        <div id="resultText">Upload a file to see results.</div>
+        <div class="info-box">
+            <div class="info-card"><h3>Gunshot</h3><div id="gunshot">-</div></div>
+            <div class="info-card"><h3>Gun Type</h3><div id="guntype">-</div></div>
+            <div class="info-card"><h3>Confidence</h3><div id="confidence">-</div></div>
+            <div class="info-card"><h3>Duration (s)</h3><div id="duration">-</div></div>
+            <div class="info-card"><h3>Energy</h3><div id="energy">-</div></div>
+            <div class="info-card"><h3>Sound Intensity (dB)</h3><div id="intensity">-</div></div>
+        </div>
+    </div>
+
+    <div id="waveform"></div>
+    <canvas id="waveformFallback"></canvas>
+    <div id="map"></div>
+    <div id="mapFallback">Map fallback: gunshot detected here</div>
+</div>
+
+<script>
+let wavesurfer = Wavesurfer.create({ container:'#waveform', waveColor:'#00ffcc', progressColor:'#00ddb3', height:150, responsive:true });
+let map, mapInitialized=false;
+let chartFallback = null;
+
+function uploadFile() {
+    let fileInput = document.getElementById("audioFile");
+    if(fileInput.files.length===0){ alert("Select a file first!"); return; }
+
+    let formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+
+    fetch("/analyze",{ method:"POST", body:formData })
+    .then(response => response.json())
+    .then(data => {
+        if(data.error){ document.getElementById("resultText").textContent = data.error; return; }
+
+        document.getElementById("gunshot").textContent = data.result_gunshot;
+        document.getElementById("guntype").textContent = data.gun_type;
+        document.getElementById("confidence").textContent = (data.confidence_gunshot*100).toFixed(1)+"%";
+        document.getElementById("duration").textContent = data.duration_sec.toFixed(2);
+        document.getElementById("energy").textContent = data.energy.toFixed(5);
+        document.getElementById("intensity").textContent = data.sound_intensity_db.toFixed(2);
+
+        // Waveform
+        const reader = new FileReader();
+        reader.onload = function(e){
+            try {
+                wavesurfer.loadBlob(new Blob([e.target.result]));
+                document.getElementById('waveformFallback').style.display='none';
+            } catch(err){
+                console.log("Wavesurfer failed, fallback graph will be shown.");
+                createFallbackWaveform(e.target.result);
+            }
+        }
+        reader.readAsArrayBuffer(fileInput.files[0]);
+
+        // Map
+        try {
+            if(!mapInitialized){
+                map = L.map('map').setView([28.6139,77.2090],13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{}).addTo(map);
+                mapInitialized=true;
+            }
+            map.eachLayer((layer)=>{ if(layer instanceof L.Marker) map.removeLayer(layer); });
+            L.marker([28.6139,77.2090]).addTo(map)
+                .bindPopup(data.result_gunshot+" detected here.<br>Gun Type: "+data.gun_type)
+                .openPopup();
+            setTimeout(()=>{ map.invalidateSize(); },100);
+            document.getElementById('mapFallback').style.display='none';
+        } catch(err){
+            console.log("Leaflet map failed, using fallback display.");
+            document.getElementById('mapFallback').style.display='block';
+        }
+    })
+    .catch(err=>console.error(err));
+}
+
+function createFallbackWaveform(arrayBuffer){
+    const audioContext = new (window.AudioContext||window.webkitAudioContext)();
+    audioContext.decodeAudioData(arrayBuffer, function(buffer){
+        const rawData = buffer.getChannelData(0);
+        const step = Math.ceil(rawData.length / 500);
+        const filteredData = rawData.filter((_, i) => i % step === 0);
+        const labels = filteredData.map((_, i) => i);
+        if(chartFallback) chartFallback.destroy();
+        const ctx = document.getElementById('waveformFallback').getContext('2d');
+        chartFallback = new Chart(ctx, {
+            type:'line',
+            data:{ labels:labels, datasets:[{ label:'Amplitude', data:filteredData, borderColor:'#00ffcc', backgroundColor:'rgba(0,255,204,0.2)', fill:true }] },
+            options:{ responsive:true, plugins:{ legend:{ display:false } }, scales:{ x:{ display:false }, y:{ ticks:{ color:'#00ffcc' } } } }
+        });
+        document.getElementById('waveformFallback').style.display='block';
+    });
+}
+</script>
+</body>
+</html>

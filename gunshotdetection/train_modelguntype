@@ -1,0 +1,116 @@
+import os
+import numpy as np
+import librosa
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.metrics import classification_report
+
+# ===============================
+# SETTINGS
+# ===============================
+DATASET_PATH = "dataset/guns"  # folder with "guns" and "not guns" subfolders
+MODEL_PATH = "models/gun_type_model_tuned.pkl"
+SAMPLE_RATE = 22050
+N_MFCC = 40
+
+# ===============================
+# FEATURE EXTRACTION
+# ===============================
+def extract_features(file_path):
+    try:
+        y, sr = librosa.load(file_path, sr=SAMPLE_RATE)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC)
+        mfcc_mean = np.mean(mfcc.T, axis=0)
+        spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
+        spectral_bandwidth = np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr))
+        zero_crossing_rate = np.mean(librosa.feature.zero_crossing_rate(y))
+        rms = np.mean(librosa.feature.rms(y=y))
+        features = np.hstack([mfcc_mean, spectral_centroid, spectral_bandwidth, zero_crossing_rate, rms])
+        return features.flatten()  # ensure 1D
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+        return None
+
+
+# ===============================
+# LOAD DATASET
+# ===============================
+def load_dataset(dataset_path):
+    X, y = [], []
+    for gun_class in os.listdir(dataset_path):
+        class_folder = os.path.join(dataset_path, gun_class)
+        if os.path.isdir(class_folder):
+            for file in os.listdir(class_folder):
+                if file.endswith(".wav"):
+                    features = extract_features(os.path.join(class_folder, file))
+                    if features is not None:
+                        X.append(features)
+                        y.append(gun_class)
+    return np.array(X), np.array(y)
+print("Loading dataset...")
+X, y = load_dataset(DATASET_PATH)
+
+if len(X) == 0:
+    raise ValueError(f"No features extracted. Check your dataset path: {DATASET_PATH}")
+
+X = np.array(X)
+y = np.array(y)
+print(f"Dataset loaded: {len(X)} samples, {X.shape[1]} features, classes: {np.unique(y)}")
+
+
+# ===============================
+# TRAIN/TEST SPLIT
+# ===============================
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# ===============================
+# RANDOM FOREST + RANDOMIZED SEARCH
+# ===============================
+print("Setting up RandomizedSearchCV...")
+
+rf = RandomForestClassifier(random_state=42)
+
+param_distributions = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [None, 20, 30],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4],
+    'max_features': ['sqrt', 'log2'],
+    'bootstrap': [True, False]
+}
+
+random_search = RandomizedSearchCV(
+    estimator=rf,
+    param_distributions=param_distributions,
+    n_iter=30,           # 30 random combinations
+    cv=5,
+    verbose=2,
+    n_jobs=1,            # avoid VSCode multiprocessing issues
+    random_state=42,
+    scoring='accuracy'
+)
+
+# ===============================
+# TRAINING
+# ===============================
+print("Training Random Forest classifier...")
+random_search.fit(X_train, y_train)
+
+best_model = random_search.best_estimator_
+print("Best hyperparameters:", random_search.best_params_)
+
+# ===============================
+# EVALUATION
+# ===============================
+y_pred = best_model.predict(X_test)
+print("Classification Report:\n", classification_report(y_test, y_pred))
+
+# ===============================
+# SAVE MODEL
+# ===============================
+os.makedirs("models", exist_ok=True)
+joblib.dump(best_model, MODEL_PATH)
+print(f"Tuned gun type model saved at {MODEL_PATH}")
